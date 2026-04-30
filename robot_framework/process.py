@@ -42,7 +42,7 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
     }
 
     HYDRATE_FULL_ITEMS = True
-    HTTP_TIMEOUT = 200
+    HTTP_TIMEOUT = 600
 
     # Navn på de konstanter i OpenOrchestrator der gemmer token-cache.
     # Opret dem manuelt første gang med værdien "{}" eller lad koden håndtere det.
