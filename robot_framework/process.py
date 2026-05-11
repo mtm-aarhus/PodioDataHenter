@@ -51,7 +51,7 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
 
     # Antal sekunder FØR udløb vi anser token'et for at være ved at udløbe.
     # 300 sekunder = 5 minutter buffer.
-    TOKEN_EXPIRY_BUFFER_SECONDS = 300
+    TOKEN_EXPIRY_BUFFER_SECONDS = 600
 
 
     # ============================================================
