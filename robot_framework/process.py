@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import pandas as pd
+import time
 import requests
 import os
 import openpyxl
@@ -42,7 +43,7 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
     }
 
     HYDRATE_FULL_ITEMS = True
-    HTTP_TIMEOUT = 60*30
+    HTTP_TIMEOUT = 120
 
     # Navn på de konstanter i OpenOrchestrator der gemmer token-cache.
     # Opret dem manuelt første gang med værdien "{}" eller lad koden håndtere det.
@@ -659,17 +660,31 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
         r.raise_for_status()
 
 
-    def fetch_items_basic(token: str, app_id: str, batch_size: int = 500) -> list[dict[str, Any]]:
+    def _get_with_retry(url: str, headers: dict, params: dict | None = None, max_retries: int = 3) -> requests.Response:
+        wait_times = [10, 30, 60]
+        for attempt in range(max_retries + 1):
+            r = requests.get(url, headers=headers, params=params, timeout=HTTP_TIMEOUT)
+            if r.status_code in (502, 503, 504) and attempt < max_retries:
+                wait = wait_times[attempt]
+                orchestrator_connection.log_info(
+                    f"HTTP {r.status_code} for {url} (attempt {attempt + 1}/{max_retries}), retrying in {wait}s..."
+                )
+                time.sleep(wait)
+                continue
+            return r
+        return r  # unreachable, but satisfies type checker
+
+
+    def fetch_items_basic(token: str, app_id: str, batch_size: int = 100) -> list[dict[str, Any]]:
         headers = {"Authorization": f"OAuth2 {token}"}
         all_items: list[dict[str, Any]] = []
         offset = 0
 
         while True:
-            r = requests.get(
+            r = _get_with_retry(
                 f"{API_BASE}/item/app/{app_id}/",
                 headers=headers,
                 params={"limit": batch_size, "offset": offset},
-                timeout=HTTP_TIMEOUT,
             )
             _raise_for_status_with_body(r)
 
@@ -690,11 +705,7 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
 
     def fetch_item_full_by_item_id(token: str, item_id: int) -> dict[str, Any]:
         headers = {"Authorization": f"OAuth2 {token}"}
-        r = requests.get(
-            f"{API_BASE}/item/{item_id}",
-            headers=headers,
-            timeout=HTTP_TIMEOUT,
-        )
+        r = _get_with_retry(f"{API_BASE}/item/{item_id}", headers=headers)
         _raise_for_status_with_body(r)
         return r.json()
 
@@ -702,7 +713,7 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
     def fetch_items(
         token: str,
         app_id: str,
-        batch_size: int = 500,
+        batch_size: int = 100,
         hydrate_full_items: bool = False,
     ) -> list[dict[str, Any]]:
         basic_items = fetch_items_basic(token, app_id=app_id, batch_size=batch_size)
@@ -793,7 +804,7 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
         items_mobilitet = fetch_items(
             token=token_mobilitet,
             app_id=APP_ID_mobilitet,
-            batch_size=500,
+            batch_size=100,
             hydrate_full_items=HYDRATE_FULL_ITEMS,
         )
         items_to_excel(
@@ -806,7 +817,7 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
         items_anlæg = fetch_items(
             token=token_anlæg,
             app_id=APP_ID_anlæg,
-            batch_size=500,
+            batch_size=100,
             hydrate_full_items=HYDRATE_FULL_ITEMS,
         )
         items_to_excel(
