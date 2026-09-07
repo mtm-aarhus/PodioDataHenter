@@ -15,13 +15,7 @@ import openpyxl
 from office365.runtime.auth.user_credential import UserCredential
 from office365.sharepoint.client_context import ClientContext
 from OpenOrchestrator.orchestrator_connection.connection import OrchestratorConnection
-
 def process(orchestrator_connection: OrchestratorConnection) -> None:
-
-
-    # ============================================================
-    # Konfiguration
-    # ============================================================
 
     API_BASE = orchestrator_connection.get_constant('PodioApiUrl').value
 
@@ -42,7 +36,10 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
         "anlaegsprojekter-i-indsatsen",
     }
 
-    HYDRATE_FULL_ITEMS = True
+    # Per-item hydrering er slået fra: filter-endpointet returnerer allerede den fulde
+    # fields-struktur, så N ekstra kald pr. app er unødvendige (og det er dem der rammer
+    # rate limit'en). Sæt til True igen hvis en enkelt kørsel viser manglende felter.
+    HYDRATE_FULL_ITEMS = False
     HTTP_TIMEOUT = 120
 
     # Navn på de konstanter i OpenOrchestrator der gemmer token-cache.
@@ -660,31 +657,62 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
         r.raise_for_status()
 
 
-    def _get_with_retry(url: str, headers: dict, params: dict | None = None, max_retries: int = 3) -> requests.Response:
+    def _request_with_retry(
+        method: str,
+        url: str,
+        headers: dict,
+        params: dict | None = None,
+        json_body: dict | None = None,
+        max_retries: int = 3,
+    ) -> requests.Response:
         wait_times = [10, 30, 60]
         for attempt in range(max_retries + 1):
-            r = requests.get(url, headers=headers, params=params, timeout=HTTP_TIMEOUT)
+            r = requests.request(
+                method, url, headers=headers, params=params, json=json_body, timeout=HTTP_TIMEOUT
+            )
+
+            # 420 = Podio rate limit. Log resterende kvote og fejl hurtigt frem for at hænge.
+            if r.status_code == 420:
+                orchestrator_connection.log_info(
+                    f"Podio rate limit (420) på {url}. "
+                    f"Remaining={r.headers.get('X-Rate-Limit-Remaining')}, "
+                    f"Limit={r.headers.get('X-Rate-Limit-Limit')}"
+                )
+                r.raise_for_status()
+
             if r.status_code in (502, 503, 504) and attempt < max_retries:
                 wait = wait_times[attempt]
                 orchestrator_connection.log_info(
-                    f"HTTP {r.status_code} for {url} (attempt {attempt + 1}/{max_retries}), retrying in {wait}s..."
+                    f"HTTP {r.status_code} for {url} (forsøg {attempt + 1}/{max_retries}), venter {wait}s..."
                 )
                 time.sleep(wait)
                 continue
+
             return r
-        return r  # unreachable, but satisfies type checker
+        return r  # unreachable, men tilfredsstiller type-checker
 
 
     def fetch_items_basic(token: str, app_id: str, batch_size: int = 100) -> list[dict[str, Any]]:
-        headers = {"Authorization": f"OAuth2 {token}"}
+        """
+        Henter alle items via filter-endpointet (POST .../filter/), som IKKE er deprecated
+        og returnerer den fulde fields-struktur — så per-item hydrering er unødvendig.
+
+        batch_size holdes lavt (100) for at undgå gateway/HTML-timeout på store svar;
+        payloaden pr. side er den samme som i den tidligere GET-baserede løsning.
+        """
+        headers = {
+            "Authorization": f"OAuth2 {token}",
+            "Content-Type": "application/json",
+        }
         all_items: list[dict[str, Any]] = []
         offset = 0
 
         while True:
-            r = _get_with_retry(
-                f"{API_BASE}/item/app/{app_id}/",
+            r = _request_with_retry(
+                "POST",
+                f"{API_BASE}/item/app/{app_id}/filter/",
                 headers=headers,
-                params={"limit": batch_size, "offset": offset},
+                json_body={"limit": batch_size, "offset": offset},
             )
             _raise_for_status_with_body(r)
 
@@ -697,7 +725,8 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
             all_items.extend(items)
             offset += len(items)
 
-            if len(items) < batch_size:
+            total = data.get("total")
+            if len(items) < batch_size or (total is not None and offset >= total):
                 break
 
         return all_items
@@ -705,7 +734,7 @@ def process(orchestrator_connection: OrchestratorConnection) -> None:
 
     def fetch_item_full_by_item_id(token: str, item_id: int) -> dict[str, Any]:
         headers = {"Authorization": f"OAuth2 {token}"}
-        r = _get_with_retry(f"{API_BASE}/item/{item_id}", headers=headers)
+        r = _request_with_retry("GET", f"{API_BASE}/item/{item_id}", headers=headers)
         _raise_for_status_with_body(r)
         return r.json()
 
